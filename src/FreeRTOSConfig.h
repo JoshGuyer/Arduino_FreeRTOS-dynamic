@@ -74,7 +74,7 @@
 #define configCPU_CLOCK_HZ				( ( uint32_t ) F_CPU )			// This F_CPU variable set by the environment
 #define configUSE_PREEMPTION		    1
 #define configUSE_IDLE_HOOK		        1
-#define configUSE_TICK_HOOK		        0
+#define configUSE_TICK_HOOK		        1
 #define configUSE_TICKLESS_IDLE			0
 #define configUSE_TRACE_FACILITY	    1
 #define configUSE_16_BIT_TICKS		    1
@@ -90,6 +90,7 @@
 #define configCHECK_FOR_STACK_OVERFLOW  1
 #define configUSE_MALLOC_FAILED_HOOK	1
 #define configUSE_EDF_SCHEDULER         1
+#define configUSE_LLF_SCHEDULER         0   // WIP: adding llf
 #define configMAX_PRIORITIES		    ( ( UBaseType_t ) 6 )
 #define configMINIMAL_STACK_SIZE	    ( ( UBaseType_t ) 127 )
 #define configIDLE_STACK_SIZE	   		( ( UBaseType_t ) 128 )
@@ -125,7 +126,7 @@ to exclude the API function. */
 #define INCLUDE_xTaskGetCurrentTaskHandle       0
 #define INCLUDE_uxTaskGetStackHighWaterMark     1
 
-// #define traceTASK_SWITCHED_OUT() {char name[20]; getTaskName(name), printf("Task Out: %s\n", name);}
-// #define traceTASK_SWITCHED_IN() {char name[20]; getTaskName(name), printf("Task In: %s\n", name);}
-// #define traceTASK_SWITCHED_OUT() {char name[20]; getTaskName(name), printf("Task Delay: %s\n", name);}
+#define traceTASK_SWITCHED_OUT() {printf("Task Out: %s\n", pxCurrentTCB->pcTaskName);}
+#define traceTASK_SWITCHED_IN() {printf("Task In: %s\n", pxCurrentTCB->pcTaskName);}
+#define traceTASK_DELAY_UNTIL() {printf("Task Delay: %s, ", pxCurrentTCB->pcTaskName);}
 #endif /* FREERTOS_CONFIG_H */

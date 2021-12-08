@@ -139,6 +139,11 @@ typedef struct tskTaskControlBlock
 		TickType_t xTaskPeriod;
 	#endif 
 
+	#if ( configUSE_LLF_SCHEDULER == 1 )
+		TickType_t xTaskPeriod;
+		TickType_t xTaskCapacity;
+	#endif
+
 	#if ( portUSING_MPU_WRAPPERS == 1 )
 		xMPU_SETTINGS	xMPUSettings;		/*< The MPU settings are defined as part of the port layer.  THIS MUST BE THE SECOND MEMBER OF THE TCB STRUCT. */
 		BaseType_t		xUsingStaticallyAllocatedStack; /* Set to pdTRUE if the stack is a statically allocated array, and pdFALSE if the stack is dynamically allocated. */
@@ -223,6 +228,14 @@ PRIVILEGED_DATA static List_t xPendingReadyList;						/*< Tasks that have been r
 	PRIVILEGED_DATA static List_t xReadyTasksListEDF;
 #endif
 
+#if ( configUSE_LLF_SCHEDULER == 1 )
+	PRIVILEGED_DATA static List_t xReadyTasksListLLF1;
+	PRIVILEGED_DATA static List_t xReadyTasksListLLF2;
+	PRIVILEGED_DATA static List_t * volatile pxReadyTaskListLLF;
+	PRIVILEGED_DATA static List_t * volatile pxReadyTaskListLLF2;
+#endif
+
+
 #if ( INCLUDE_vTaskDelete == 1 )
 
 	PRIVILEGED_DATA static List_t xTasksWaitingTermination;				/*< Tasks that have been deleted - but their memory not yet freed. */
@@ -243,6 +256,10 @@ PRIVILEGED_DATA static List_t xPendingReadyList;						/*< Tasks that have been r
 #endif
 
 /* Other file private variables. --------------------------------*/
+PRIVILEGED_DATA static volatile TickType_t xTLPlaneStart			= ( TickType_t ) 0U;
+PRIVILEGED_DATA static volatile TickType_t xTLPlaneEnd				= ( TickType_t ) 0U;
+PRIVILEGED_DATA static volatile TickType_t nextEventTick			= ( TickType_t ) 0U;
+PRIVILEGED_DATA static volatile TickType_t lastEventTick			= ( TickType_t ) 0U;
 PRIVILEGED_DATA static volatile UBaseType_t uxCurrentNumberOfTasks 	= ( UBaseType_t ) 0U;
 PRIVILEGED_DATA static volatile TickType_t xTickCount 				= ( TickType_t ) 0U;
 PRIVILEGED_DATA static volatile UBaseType_t uxTopReadyPriority 		= tskIDLE_PRIORITY;
@@ -390,18 +407,23 @@ count overflows. */
  * Place the task represented by pxTCB into the appropriate ready list for
  * the task.  It is inserted at the end of the list.
  */
-#if (configUSE_EDF_SCHEDULER == 0)																
+#if (configUSE_EDF_SCHEDULER == 0 && configUSE_LLF_SCHEDULER == 0)																
 	#define prvAddTaskToReadyList( pxTCB )														\
 		traceMOVED_TASK_TO_READY_STATE( pxTCB );														\
 		taskRECORD_READY_PRIORITY( ( pxTCB )->uxPriority );												\
 		vListInsertEnd( &(pxReadyTasksLists[(pxTCB)->uxPriority]), &((pxTCB)->xGenericListItem));
-#else																						
+#elif (configUSE_EDF_SCHEDULER == 1 && configUSE_LLF_SCHEDULER == 0)																						
 	#define prvAddTaskToReadyList( pxTCB )														\
 		traceMOVED_TASK_TO_READY_STATE( pxTCB )														\
 		taskRECORD_READY_PRIORITY( ( pxTCB )->uxPriority )												\
 		vListInsert( &(xReadyTasksListEDF), &((pxTCB)->xGenericListItem));
-#endif																								
-	
+#elif (configUSE_EDF_SCHEDULER == 0 && configUSE_LLF_SCHEDULER == 1)
+	#define prvAddTaskToReadyList( pxTCB )														\
+		traceMOVED_TASK_TO_READY_STATE( pxTCB )														\
+		taskRECORD_READY_PRIORITY( ( pxTCB )->uxPriority )												\
+		vListInsert( &(pxReadyTaskListLLREF), &( ( pxTCB )->xGenericListItem ) );
+#endif	
+
 /*-----------------------------------------------------------*/
 
 /*
@@ -433,7 +455,7 @@ to its original value when it is released. */
 
 #if configUSE_TICK_HOOK > 0
 	extern void vApplicationTickHook( void ){
-		printf("TICK: %d\n", (int)xTaskGetTickCount());
+		//printf("TICK: %d\n", xTickCount);
 	}
 #endif
 
@@ -909,7 +931,7 @@ StackType_t *pxTopOfStack;
 			#endif /* configUSE_TRACE_FACILITY */
 			#if( configUSE_EDF_SCHEDULER == 1)
 			{
-				listSET_LIST_ITEM_VALUE( &(( pxNewTCB)->xGenericListItem), (pxNewTCB)->xTaskPeriod + xTickCount);
+				listSET_LIST_ITEM_VALUE( &(( pxNewTCB)->xGenericListItem), ((pxNewTCB)->xTaskPeriod + xTaskGetTickCount()));
 			}
 			#endif
 			traceTASK_CREATE( pxNewTCB );
@@ -950,6 +972,208 @@ StackType_t *pxTopOfStack;
 
 	return xReturn;
 }
+/*-----------------------------------------------------------*/
+BaseType_t xTaskLLFCreate( TaskFunction_t pxTaskCode, const char * const pcName, const uint16_t usStackDepth, void * const pvParameters, UBaseType_t uxPriority, TaskHandle_t * const pxCreatedTask, StackType_t * const puxStackBuffer, const MemoryRegion_t * const xRegions, TickType_t period ) /*lint !e971 Unqualified char types are allowed for strings and single characters only. */
+{
+BaseType_t xReturn;
+TCB_t * pxNewTCB;
+StackType_t *pxTopOfStack;
+
+	configASSERT( pxTaskCode );
+	configASSERT( ( ( uxPriority & ( UBaseType_t ) ( ~portPRIVILEGE_BIT ) ) < ( UBaseType_t ) configMAX_PRIORITIES ) );
+
+	/* Allocate the memory required by the TCB and stack for the new task,
+	checking that the allocation was successful. */
+	pxNewTCB = prvAllocateTCBAndStack( usStackDepth, puxStackBuffer );
+	#if ( configUSE_LLF_SCHEDULER == 1)
+	{
+		pxNewTCB->xTaskPeriod = period;
+		pxNewTCB->xTascCapacity = capacity;
+	}
+	#endif
+
+	if( pxNewTCB != NULL )
+	{
+		#if( portUSING_MPU_WRAPPERS == 1 )
+			/* Should the task be created in privileged mode? */
+			BaseType_t xRunPrivileged;
+			if( ( uxPriority & portPRIVILEGE_BIT ) != 0U )
+			{
+				xRunPrivileged = pdTRUE;
+			}
+			else
+			{
+				xRunPrivileged = pdFALSE;
+			}
+			uxPriority &= ~portPRIVILEGE_BIT;
+
+			if( puxStackBuffer != NULL )
+			{
+				/* The application provided its own stack.  Note this so no
+				attempt is made to delete the stack should that task be
+				deleted. */
+				pxNewTCB->xUsingStaticallyAllocatedStack = pdTRUE;
+			}
+			else
+			{
+				/* The stack was allocated dynamically.  Note this so it can be
+				deleted again if the task is deleted. */
+				pxNewTCB->xUsingStaticallyAllocatedStack = pdFALSE;
+			}
+		#endif /* portUSING_MPU_WRAPPERS == 1 */
+
+		/* Calculate the top of stack address.  This depends on whether the
+		stack grows from high memory to low (as per the 80x86) or vice versa.
+		portSTACK_GROWTH is used to make the result positive or negative as
+		required by the port. */
+		#if( portSTACK_GROWTH < 0 )
+		{
+			pxTopOfStack = pxNewTCB->pxStack + ( usStackDepth - ( uint16_t ) 1 );
+			pxTopOfStack = ( StackType_t * ) ( ( ( portPOINTER_SIZE_TYPE ) pxTopOfStack ) & ( ~( ( portPOINTER_SIZE_TYPE ) portBYTE_ALIGNMENT_MASK ) ) ); /*lint !e923 MISRA exception.  Avoiding casts between pointers and integers is not practical.  Size differences accounted for using portPOINTER_SIZE_TYPE type. */
+
+			/* Check the alignment of the calculated top of stack is correct. */
+			configASSERT( ( ( ( portPOINTER_SIZE_TYPE ) pxTopOfStack & ( portPOINTER_SIZE_TYPE ) portBYTE_ALIGNMENT_MASK ) == 0UL ) );
+		}
+		#else /* portSTACK_GROWTH */
+		{
+			pxTopOfStack = pxNewTCB->pxStack;
+
+			/* Check the alignment of the stack buffer is correct. */
+			configASSERT( ( ( ( portPOINTER_SIZE_TYPE ) pxNewTCB->pxStack & ( portPOINTER_SIZE_TYPE ) portBYTE_ALIGNMENT_MASK ) == 0UL ) );
+
+			/* If we want to use stack checking on architectures that use
+			a positive stack growth direction then we also need to store the
+			other extreme of the stack space. */
+			pxNewTCB->pxEndOfStack = pxNewTCB->pxStack + ( usStackDepth - 1 );
+		}
+		#endif /* portSTACK_GROWTH */
+
+		/* Setup the newly allocated TCB with the initial state of the task. */
+		prvInitialiseTCBVariables( pxNewTCB, pcName, uxPriority, xRegions, usStackDepth );
+
+		/* Initialize the TCB stack to look as if the task was already running,
+		but had been interrupted by the scheduler.  The return address is set
+		to the start of the task function. Once the stack has been initialised
+		the	top of stack variable is updated. */
+		#if( portUSING_MPU_WRAPPERS == 1 )
+		{
+			pxNewTCB->pxTopOfStack = pxPortInitialiseStack( pxTopOfStack, pxTaskCode, pvParameters, xRunPrivileged );
+		}
+		#else /* portUSING_MPU_WRAPPERS */
+		{
+			pxNewTCB->pxTopOfStack = pxPortInitialiseStack( pxTopOfStack, pxTaskCode, pvParameters );
+		}
+		#endif /* portUSING_MPU_WRAPPERS */
+
+		if( ( void * ) pxCreatedTask != NULL )
+		{
+			/* Pass the TCB out - in an anonymous way.  The calling function/
+			task can use this as a handle to delete the task later if
+			required.*/
+			*pxCreatedTask = ( TaskHandle_t ) pxNewTCB;
+		}
+		else
+		{
+			mtCOVERAGE_TEST_MARKER();
+		}
+
+		/* Ensure interrupts don't access the task lists while they are being
+		updated. */
+		taskENTER_CRITICAL();
+		{
+			uxCurrentNumberOfTasks++;
+			if( pxCurrentTCB == NULL )
+			{
+				/* There are no other tasks, or all the other tasks are in
+				the suspended state - make this the current task. */
+				pxCurrentTCB =  pxNewTCB;
+
+				if( uxCurrentNumberOfTasks == ( UBaseType_t ) 1 )
+				{
+					/* This is the first task to be created so do the preliminary
+					initialisation required.  We will not recover if this call
+					fails, but we will report the failure. */
+					prvInitialiseTaskLists();
+				}
+				else
+				{
+					mtCOVERAGE_TEST_MARKER();
+				}
+			}
+			else
+			{
+				/* If the scheduler is not already running, make this task the
+				current task if it is the highest priority task to be created
+				so far. */
+				if( xSchedulerRunning == pdFALSE )
+				{
+					if( pxCurrentTCB->uxPriority <= uxPriority )
+					{
+						pxCurrentTCB = pxNewTCB;
+					}
+					else
+					{
+						mtCOVERAGE_TEST_MARKER();
+					}
+				}
+				else
+				{
+					mtCOVERAGE_TEST_MARKER();
+				}
+			}
+
+			uxTaskNumber++;
+
+			#if ( configUSE_TRACE_FACILITY == 1 )
+			{
+				/* Add a counter into the TCB for tracing only. */
+				pxNewTCB->uxTCBNumber = uxTaskNumber;
+			}
+			#endif /* configUSE_TRACE_FACILITY */
+			#if( configUSE_LLF_SCHEDULER == 1)
+			{
+				listSET_LIST_ITEM_VALUE( &( ( pxNewTCB )->xGenericListItem ), ( pxNewTCB )->0);
+			}
+			#endif
+			traceTASK_CREATE( pxNewTCB );
+			
+			prvAddTaskToReadyList( pxNewTCB );
+
+			xReturn = pdPASS;
+			portSETUP_TCB( pxNewTCB );
+		}
+		taskEXIT_CRITICAL();
+	}
+	else
+	{
+		xReturn = errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY;
+		traceTASK_CREATE_FAILED();
+	}
+
+	if( xReturn == pdPASS )
+	{
+		if( xSchedulerRunning != pdFALSE )
+		{
+			/* If the created task is of a higher priority than the current task
+			then it should run now. */
+			if( pxCurrentTCB->uxPriority < uxPriority )
+			{
+				taskYIELD_IF_USING_PREEMPTION();
+			}
+			else
+			{
+				mtCOVERAGE_TEST_MARKER();
+			}
+		}
+		else
+		{
+			mtCOVERAGE_TEST_MARKER();
+		}
+	}
+
+	return xReturn;
+}
+
 /*-----------------------------------------------------------*/
 
 #if ( INCLUDE_vTaskDelete == 1 )
@@ -1769,6 +1993,12 @@ BaseType_t xReturn;
 		TickType_t initIDLEPeriod = 100;
 		xReturn = xTaskPeriodicCreate( prvIdleTask, "IDLE", tskIDLE_STACK_SIZE, (void *) NULL, (tskIDLE_PRIORITY | portPRIVILEGE_BIT), NULL, NULL, NULL, initIDLEPeriod);
 	}
+	#elif ( configUSE_LLF_SCHEDULER == 1 )
+	{
+		tickType initIDLEPeriod = 0;
+		tickType initIDLECapacity = 1;
+		xReturn = xTaskLLREFCreate( prvIdleTask, "IDLE", tskIDLE_STACK_SIZE, ( void * ) NULL, ( tskIDLE_PRIORITY | portPRIVILEGE_BIT ), NULL, initIDLEPeriod, initIDLECapacity );
+	}
 	#else
 	{
 		/* Create the idle task without storing its handle. */
@@ -2165,6 +2395,15 @@ BaseType_t xSwitchRequired = pdFALSE;
 	Increments the tick then checks to see if the new tick value will cause any
 	tasks to be unblocked. */
 	traceTASK_INCREMENT_TICK( xTickCount );
+
+	#if (configUSE_LLF_SCHEDULER == 1)
+		if ( xxTickCount ==  xTLPlaneStart )
+		{
+			functNewTLPlane();
+			functEventHandle();
+		}
+	#endif
+
 	if( uxSchedulerSuspended == ( UBaseType_t ) pdFALSE )
 	{
 		/* Increment the RTOS tick, switching the delayed and overflowed
@@ -2610,6 +2849,43 @@ TickType_t xTimeToWake;
 	#endif /* INCLUDE_vTaskSuspend */
 }
 /*-----------------------------------------------------------*/
+
+void functEventHandle()
+{
+	/*update the running task local remaining execution time:*/
+	// int tmp = ( pxCurrentTCB )->xGenericListItem - ( lastEventTick - xTaskGetTickCount() );
+	// listSET_LIST_ITEM_VALUE( &( ( pxCurrentTCB )->xGenericListItem ), tmp);
+
+	/*sort Ready list bu POP and PUSH the running task: */
+	// uxListRemove( &( pxCurrentTCB)->xGenericListItem );
+	// prvAddTaskToReadyList( pxCurrentTCB );
+
+	// /*update last event time:*/
+	// lastEventTick = nextEventTime;
+
+	// /*calc next event B time:*/
+	// TCB_t pxTCB = ( TCB_t * ) listGET_OWNER_OF_HEAD_ENTRY( xReadyTasksListLLREF );
+	// TickType_t u = (TickType_t )listGET_LIST_ITEM_VALUE( &( pxTCB->xGenericListItem ) );
+	// nextEventTick = xTLPlaneStart + ( u * (xTLPlaneEnd-xTLPlaneStart) );
+
+	// portYELD_WITH_CONTEXT();
+}
+
+void functNewTLPlane()
+{
+	// /*calc the T-L plane end:*/
+	// xTLPlaneEnd = min( xTLPlaneStart + ( pxCurrentTCB )->xTaskPeriod, xNextTaskUnblockTime );
+	// /*initialize local execution time left for the tasks in Ready List and sort it:*/
+	// initializeAndSortLLF();
+
+	// lastEventTick = nextEventTime;
+
+	// TCB_t pxTCB = ( TCB_t * ) listGET_OWNER_OF_HEAD_ENTRY( xReadyTasksListLLREF );
+	// TickType_t u = (TickType_t )listGET_LIST_ITEM_VALUE( &( pxTCB->xGenericListItem ) );
+
+	// /*force context switch:*/
+	// portYELD_WITH_CONTEXT();
+}
 
 #if configUSE_TIMERS == 1
 
@@ -3167,6 +3443,30 @@ UBaseType_t x;
 }
 /*-----------------------------------------------------------*/
 
+void initializeAndSortLLF()
+{
+	// List_t *pxTemp;
+
+	// configASSERT( ( listLIST_IS_EMPTY( pxReadyTaskListLLREF2 ) ) );
+	// while( listLIST_IS_EMPTY( pxReadyTaskListLLREF )
+	// {
+	// 	TCB_t *pxTCB;
+	// 	uxListRemove( &( pxTCB->xGenericListItem );
+
+	// 	/*update the task local remaining execution time:*/
+	// 	int tmp = ( ( pxtTCB )->xTaskPeriod / ( pxtTCB )->xTaskCapacity ) * (lastEventTick - getCurrTick() );
+	// 	listSET_LIST_ITEM_VALUE( &( ( pxCurrentTCB )->xGenericListItem ), tmp);
+
+	// 	/*add task to the other ready list (sort order):*/
+	// 	vListInsert( &pxReadyTaskListLLREF2, &( pxTCB->xGenericListItem ) );
+	// }
+
+	// /*invert the pointers to the two ready lists:*/
+	// pxTemp = pxReadyTaskListLLREF;
+	// pxReadyTaskListLLREF = pxReadyTaskListLLREF2;
+	// pxReadyTaskListLLREF = pxTemp;
+}
+
 #if ( configNUM_THREAD_LOCAL_STORAGE_POINTERS != 0 )
 
 	void vTaskSetThreadLocalStoragePointer( TaskHandle_t xTaskToSet, BaseType_t xIndex, void *pvValue )
@@ -3237,6 +3537,15 @@ UBaseType_t uxPriority;
 	#if ( configUSE_EDF_SCHEDULER == 1) 
 	{
 		vListInitialise( &xReadyTasksListEDF );
+	}
+	#endif
+
+	#if ( configUSE_LLF_SCHEDULER == 1 )
+	{
+		vListInitialise( &xReadyTasksListLLREF1 );
+		vListInitialise( &xReadyTasksListLLREF2 );
+		pxReadyTaskListLLREF = &xReadyTasksListLLREF1;
+		pxReadyTaskListLLREF2 = &xReadyTasksListLLREF2;
 	}
 	#endif
 
